@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { logError } from "./index";
 
 const CONFIG_DIR = join(homedir(), ".config", "image-search");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -30,6 +31,7 @@ export async function readConfig(): Promise<Config> {
     const config = await file.json();
     return config;
   } catch (error) {
+    await logError(error as Error, `readConfig - ${CONFIG_FILE}`);
     console.error(`Warning: Could not read config file at ${CONFIG_FILE}`);
     return {};
   }

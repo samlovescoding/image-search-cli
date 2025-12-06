@@ -2,7 +2,7 @@
 // CLI entry point for image-search
 // Handles config management, credential loading, and CLI argument parsing
 
-import { main } from "./index";
+import { main, logError } from "./index";
 import {
   readConfig,
   setConfigValue,
@@ -16,6 +16,7 @@ interface CliArgs {
   searchEngineId?: string;
   count?: number;
   parallel?: number;
+  delay?: number;
   queries: string[];
   command?: "config" | "open";
   configAction?: "set" | "get" | "list" | "path";
@@ -60,6 +61,9 @@ function parseArgs(): CliArgs {
       i++;
     } else if (args[i] === "--parallel" && i + 1 < args.length) {
       result.parallel = parseInt(args[i + 1], 10);
+      i++;
+    } else if (args[i] === "--delay" && i + 1 < args.length) {
+      result.delay = parseInt(args[i + 1], 10);
       i++;
     } else if (!args[i].startsWith("--")) {
       result.queries.push(args[i]);
@@ -111,6 +115,7 @@ async function handleOpenCommand(): Promise<void> {
 
     await proc.exited;
   } catch (error) {
+    await logError(error as Error, "handleOpenCommand");
     console.error(`Error opening folder: ${error}`);
     console.error(`\nYou can manually open: ${searchesPath}`);
     process.exit(1);
@@ -142,6 +147,7 @@ async function handleConfigCommand(action: string, args: string[]): Promise<void
           console.log(`Set ${key} successfully`);
         } catch (error) {
           if (error instanceof Error) {
+            await logError(error, `handleConfigCommand set - key: ${key}`);
             console.error(`Error: ${error.message}`);
           }
         }
@@ -250,7 +256,8 @@ async function run() {
   await main(apiKey, searchEngineId);
 }
 
-run().catch((error) => {
+run().catch(async (error) => {
+  await logError(error as Error, "Fatal error in run()");
   console.error("Fatal error:", error);
   process.exit(1);
 });

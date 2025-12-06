@@ -6,14 +6,45 @@
 //
 // Tech Stack: Bun, Google Image Search API, Local File System
 
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 
 export const DOWNLOAD_DIRECTORY = "./searches";
 export const DEFAULT_MAX_RESULTS = 100;
 export const DEFAULT_PARALLEL_DOWNLOADS = 5;
+export const DEFAULT_API_DELAY_MS = 1100; // 1.1 second delay between API requests to avoid rate limiting
+export const DEFAULT_RATE_LIMIT_RETRY_DELAY_MS = 60000; // 60 seconds wait on rate limit
 const DOWNLOAD_TIMEOUT_MS = 30000; // 30 second timeout for image downloads
+const ERROR_LOG_FILE = "./errors.log";
+
+// Sleep utility for rate limiting
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Error logging utility
+export async function logError(error: string | Error, context?: string): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const errorMessage = error instanceof Error ? error.message : error;
+  const stack = error instanceof Error ? error.stack : undefined;
+
+  let logEntry = `[${timestamp}]`;
+  if (context) {
+    logEntry += ` [${context}]`;
+  }
+  logEntry += ` ${errorMessage}`;
+  if (stack) {
+    logEntry += `\nStack: ${stack}`;
+  }
+  logEntry += '\n\n';
+
+  try {
+    await appendFile(ERROR_LOG_FILE, logEntry);
+  } catch (writeError) {
+    console.error('Failed to write to error log:', writeError);
+  }
+}
 
 interface ImageResult {
   link: string;
@@ -134,7 +165,9 @@ async function searchImages(
   query: string,
   apiKey: string,
   searchEngineId: string,
-  startIndex: number = 1
+  startIndex: number = 1,
+  retryOnRateLimit: boolean = true,
+  retryDelayMs: number = DEFAULT_RATE_LIMIT_RETRY_DELAY_MS
 ): Promise<ImageResult[]> {
   const url = new URL("https://www.googleapis.com/customsearch/v1");
   url.searchParams.set("key", apiKey);
@@ -148,10 +181,35 @@ async function searchImages(
   const data: SearchResponse = await response.json();
 
   if (data.error) {
+    const errorContext = `searchImages (query: "${query}", startIndex: ${startIndex})`;
+    await logError(new Error(`API Error ${data.error.code}: ${data.error.message}`), errorContext);
+
     console.error(`\nAPI Error Code: ${data.error.code}`);
     console.error(`API Error Message: ${data.error.message}`);
 
-    if (data.error.message.includes("blocked")) {
+    // Handle rate limit errors with automatic retry
+    if (data.error.code === 429 || data.error.message.includes("Quota exceeded")) {
+      console.error("\n⚠️  RATE LIMIT EXCEEDED");
+
+      if (retryOnRateLimit) {
+        const waitSeconds = Math.floor(retryDelayMs / 1000);
+        console.error(`Automatically waiting ${waitSeconds} seconds before retrying...`);
+        console.error("You can disable auto-retry by modifying the code if needed.\n");
+
+        await sleep(retryDelayMs);
+
+        console.log("Retrying request after rate limit wait...");
+        // Retry the request (without further retries to avoid infinite loops)
+        return await searchImages(query, apiKey, searchEngineId, startIndex, false, retryDelayMs);
+      } else {
+        console.error("You've hit Google's API rate limit (queries per minute).");
+        console.error("\nSolutions:");
+        console.error("1. Wait 60 seconds for the quota to reset, then try again");
+        console.error("2. Reduce the number of images: --count 10");
+        console.error("3. Increase delay between requests: --delay 2000 (2 seconds)");
+        console.error("\nThe tool includes automatic rate limiting (1.1s delay by default).");
+      }
+    } else if (data.error.message.includes("blocked")) {
       console.error("\nTroubleshooting:");
       console.error("1. Make sure Custom Search API is enabled in Google Cloud Console");
       console.error("   Visit: https://console.cloud.google.com/apis/library/customsearch.googleapis.com");
@@ -171,7 +229,7 @@ async function searchImages(
 async function listPastSearches() {
   if (!existsSync(DOWNLOAD_DIRECTORY)) {
     console.log("No past searches found.");
-    console.log("\nUsage: bun index.ts [--count N] [--parallel N] <search query>");
+    console.log("\nUsage: bun index.ts [--count N] [--parallel N] [--delay MS] <search query>");
     return;
   }
 
@@ -203,13 +261,14 @@ async function listPastSearches() {
       });
     } catch (error) {
       // Skip directories with invalid metadata
+      await logError(error as Error, `listPastSearches - invalid metadata in ${dir.name}`);
       continue;
     }
   }
 
   if (searches.length === 0) {
     console.log("No past searches found.");
-    console.log("\nUsage: bun index.ts [--count N] [--parallel N] <search query>");
+    console.log("\nUsage: bun index.ts [--count N] [--parallel N] [--delay MS] <search query>");
     return;
   }
 
@@ -238,9 +297,10 @@ async function listPastSearches() {
 
   console.log("\n" + "=".repeat(80));
   console.log("\nTo start a new search:");
-  console.log("  bun index.ts [--count N] [--parallel N] <search query>");
-  console.log("\nExample:");
+  console.log("  bun index.ts [--count N] [--parallel N] [--delay MS] <search query>");
+  console.log("\nExamples:");
   console.log("  bun index.ts --count 20 \"sunset ocean\"");
+  console.log("  bun index.ts --count 50 --delay 2000 \"mountain landscape\"");
 }
 
 async function downloadImage(
@@ -262,6 +322,7 @@ async function downloadImage(
 
     if (!response.ok) {
       clearTimeout(timeoutId);
+      await logError(`Download failed with status ${response.status}`, `downloadImage - ${url}`);
       return { success: false, finalPath: basePath };
     }
 
@@ -289,10 +350,12 @@ async function downloadImage(
 
     // Check if this was a timeout
     if (error instanceof Error && error.name === "AbortError") {
-      // Timeout occurred - silently fail but could log if needed
+      // Timeout occurred - log it
+      await logError(error, `downloadImage timeout - ${url}`);
       return { success: false, finalPath: basePath };
     }
 
+    await logError(error as Error, `downloadImage - ${url}`);
     return { success: false, finalPath: basePath };
   }
 }
@@ -302,7 +365,8 @@ export async function performSearch(
   apiKey: string,
   searchEngineId: string,
   maxResults: number,
-  parallelDownloads: number
+  parallelDownloads: number,
+  apiDelayMs: number = DEFAULT_API_DELAY_MS
 ) {
   console.log(`Searching for: "${query}"`);
   console.log(`Target: ${maxResults} images\n`);
@@ -338,12 +402,19 @@ export async function performSearch(
         allImages = allImages.slice(0, maxResults);
         break;
       }
+
+      // Rate limiting: wait between API requests (except after the last one)
+      if (i < numRequests - 1 && apiDelayMs > 0) {
+        await sleep(apiDelayMs);
+      }
     } catch (error) {
       // Check if this is a pagination limit error
       if (error instanceof Error && error.message.includes("invalid argument")) {
         console.log(`\n⚠️  Reached API pagination limit. Retrieved ${allImages.length} images.`);
+        await logError(error, `performSearch pagination limit - query: "${query}"`);
         break;
       }
+      await logError(error as Error, `performSearch API call - query: "${query}", startIndex: ${startIndex}`);
       console.error(`\nError fetching results at index ${startIndex}:`, error);
       if (allImages.length === 0) {
         // If we haven't gotten any images yet, this is a fatal error
@@ -443,6 +514,7 @@ export async function main(apiKey?: string, searchEngineId?: string) {
   // Parse arguments
   let maxResults = DEFAULT_MAX_RESULTS;
   let parallelDownloads = DEFAULT_PARALLEL_DOWNLOADS;
+  let apiDelayMs = DEFAULT_API_DELAY_MS;
   const queries: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -460,6 +532,13 @@ export async function main(apiKey?: string, searchEngineId?: string) {
         process.exit(1);
       }
       parallelDownloads = Math.min(parallelDownloads, 20); // Reasonable max
+      i++; // Skip next arg
+    } else if (args[i] === "--delay" && i + 1 < args.length) {
+      apiDelayMs = parseInt(args[i + 1], 10);
+      if (isNaN(apiDelayMs) || apiDelayMs < 0) {
+        console.error("Error: --delay must be a non-negative number (milliseconds)");
+        process.exit(1);
+      }
       i++; // Skip next arg
     } else if (!args[i].startsWith("--")) {
       // Treat each non-flag argument as a separate query
@@ -493,7 +572,7 @@ export async function main(apiKey?: string, searchEngineId?: string) {
     }
 
     try {
-      const result = await performSearch(query, apiKey, searchEngineId, maxResults, parallelDownloads);
+      const result = await performSearch(query, apiKey, searchEngineId, maxResults, parallelDownloads, apiDelayMs);
       results.push({
         query,
         success: result.successCount,
@@ -501,6 +580,7 @@ export async function main(apiKey?: string, searchEngineId?: string) {
         location: result.outputDir,
       });
     } catch (error) {
+      await logError(error as Error, `main - search query: "${query}"`);
       console.error(`\nError running search for "${query}":`, error);
       results.push({
         query,
