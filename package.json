@@ -1,0 +1,38 @@
+{
+  "name": "image-search",
+  "version": "1.0.0",
+  "description": "A CLI tool to search and download images using Google Custom Search API",
+  "module": "index.ts",
+  "type": "module",
+  "bin": {
+    "image-search": "./cli.ts"
+  },
+  "scripts": {
+    "build": "bun build ./cli.ts --compile --outfile image-search",
+    "build:linux": "bun build ./cli.ts --compile --target=bun-linux-x64 --outfile image-search-linux",
+    "build:macos": "bun build ./cli.ts --compile --target=bun-darwin-x64 --outfile image-search-macos",
+    "build:windows": "bun build ./cli.ts --compile --target=bun-windows-x64 --outfile image-search-windows.exe",
+    "build:all": "bun run build:linux && bun run build:macos && bun run build:windows",
+    "test": "bun test"
+  },
+  "keywords": [
+    "image",
+    "search",
+    "google",
+    "download",
+    "cli",
+    "custom-search"
+  ],
+  "author": "",
+  "license": "MIT",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
